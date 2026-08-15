@@ -1,9 +1,11 @@
 from flask import Flask, render_template, request, redirect, session, url_for
 import sqlite3
 import os
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
-app.secret_key = 'bensafy_secret_key_2026'
+# احصل على SECRET_KEY من متغيرات البيئة وإلا استخدم قيمة افتراضية (غير مخصصة للإنتاج)
+app.secret_key = os.environ.get('SECRET_KEY', 'bensafy_secret_key_2026')
 
 # التأكد من وجود مجلد للإيصالات
 UPLOAD_FOLDER = 'uploads'
@@ -76,13 +78,18 @@ def login_page():
 
 @app.route("/register", methods=['POST'])
 def register():
-    name = request.form['name']
-    phone = request.form['phone']
-    password = request.form['password']
+    name = request.form.get('name', '').strip()
+    phone = request.form.get('phone', '').strip()
+    password = request.form.get('password', '')
+
+    if not (name and phone and password):
+        return render_template('index.html', page='register', error="الرجاء ملء كل الحقول")
+
+    hashed = generate_password_hash(password)
     try:
         conn = sqlite3.connect('system.db')
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO users (name, phone, password, verified) VALUES (?, ?, ?, 1)", (name, phone, password))
+        cursor.execute("INSERT INTO users (name, phone, password, verified) VALUES (?, ?, ?, 1)", (name, phone, hashed))
         conn.commit()
         conn.close()
         return redirect(url_for('login_page'))
@@ -91,17 +98,19 @@ def register():
 
 @app.route("/login", methods=['POST'])
 def login():
-    name = request.form['name']
-    phone = request.form['phone']
-    password = request.form['password']
-    
+    phone = request.form.get('phone', '').strip()
+    password = request.form.get('password', '')
+
+    if not (phone and password):
+        return render_template('index.html', page='login', error="الرجاء ملء كل الحقول")
+
     conn = sqlite3.connect('system.db')
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE phone=? AND password=??", (phone, password))
+    cursor.execute("SELECT * FROM users WHERE phone=?", (phone,))
     user = cursor.fetchone()
     conn.close()
-    
-    if user:
+
+    if user and check_password_hash(user[3], password):
         session['user_id'] = user[0]
         session['user_name'] = user[1]
         return redirect(url_for('dashboard'))
@@ -126,15 +135,20 @@ def send_request():
     if 'user_id' not in session:
         return redirect(url_for('login_page'))
     
-    network = request.form['network']
-    target_account = request.form['target_account']
-    amount = request.form['amount']
-    currency = request.form['currency']
-    
+    network = request.form.get('network', '').strip()
+    target_account = request.form.get('target_account', '').strip()
+    amount = request.form.get('amount', '0')
+    currency = request.form.get('currency', '').strip()
+
+    try:
+        amount_val = float(amount)
+    except ValueError:
+        return render_template('index.html', page='dashboard', error="المبلغ غير صالح")
+
     conn = sqlite3.connect('system.db')
     cursor = conn.cursor()
     cursor.execute("INSERT INTO requests (network, target_account, user_id, user_name, amount, currency) VALUES (?, ?, ?, ?, ?, ?)",
-                   (network, target_account, session['user_id'], session['user_name'], amount, currency))
+                   (network, target_account, session['user_id'], session['user_name'], amount_val, currency))
     conn.commit()
     conn.close()
     
