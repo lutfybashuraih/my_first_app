@@ -1,16 +1,25 @@
-from flask import Flask, render_template, request, redirect, session, url_for
+from flask import Flask, render_template, request, redirect, session, url_for, flash
 import sqlite3
 import os
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
+from flask_wtf import CSRFProtect
+import uuid
+import datetime
 
 app = Flask(__name__)
 # احصل على SECRET_KEY من متغيرات البيئة وإلا استخدم قيمة افتراضية (غير مخصصة للإنتاج)
 app.secret_key = os.environ.get('SECRET_KEY', 'bensafy_secret_key_2026')
 
+# حماية CSRF
+csrf = CSRFProtect(app)
+
 # التأكد من وجود مجلد للإيصالات
 UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024  # 5MB حد لتحميل الملفات
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'pdf'}
 
 # إنشاء قاعدة البيانات والجداول تلقائياً
 def init_db():
@@ -55,13 +64,27 @@ def init_db():
                         username TEXT UNIQUE,
                         password TEXT)''')
     
-    # إنشاء حساب المدير الافتراضي (المستخدم: admin, كلمة المرور: 123456)
+    # إنشاء حساب المدير الافتراضي (المستخدم: admin, كلمة المرور: 123456) إذا لم يكن موجودًا
     cursor.execute("INSERT OR IGNORE INTO superadmin (id, username, password) VALUES (1, 'admin', '123456')")
-    
+
+    # تأكد أن كلمة مرور المدير مخزنة كهاش آمن؛ إن لم تكن، حدثها
+    cursor.execute("SELECT id, password FROM superadmin WHERE id=1")
+    row = cursor.fetchone()
+    if row:
+        sa_id, sa_pass = row
+        # اكتشاف ما إذا كانت كلمة المرور مُجزّأة (werkzeug تبدأ عادة بـ 'pbkdf2:')
+        if not sa_pass.startswith('pbkdf2:'):
+            hashed = generate_password_hash(sa_pass)
+            cursor.execute("UPDATE superadmin SET password=? WHERE id=1", (hashed,))
+
     conn.commit()
     conn.close()
 
 init_db()
+
+# مساعدة لفحص امتدادات الملفات
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 # --- مسارات العملاء ---
 @app.route("/")
@@ -153,6 +176,45 @@ def send_request():
     conn.close()
     
     return redirect(url_for('dashboard'))
+
+@app.route("/upload_receipt", methods=['POST'])
+def upload_receipt():
+    # يتوقع request.form['request_id'] وملف تحت 'receipt'
+    if 'user_id' not in session:
+        return redirect(url_for('login_page'))
+
+    request_id = request.form.get('request_id')
+    if not request_id:
+        flash('معرّف الطلب مفقود')
+        return redirect(url_for('dashboard'))
+
+    if 'receipt' not in request.files:
+        flash('لم يتم إرسال ملف')
+        return redirect(url_for('dashboard'))
+
+    file = request.files['receipt']
+    if file.filename == '':
+        flash('لم يتم اختيار ملف')
+        return redirect(url_for('dashboard'))
+
+    if file and allowed_file(file.filename):
+        ext = file.filename.rsplit('.', 1)[1].lower()
+        filename = f"{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex}.{ext}"
+        filename = secure_filename(filename)
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(filepath)
+
+        conn = sqlite3.connect('system.db')
+        cursor = conn.cursor()
+        cursor.execute("UPDATE requests SET receipt=? WHERE id=? AND user_id=?", (filename, request_id, session['user_id']))
+        conn.commit()
+        conn.close()
+
+        flash('تم رفع الإيصال بنجاح')
+        return redirect(url_for('dashboard'))
+    else:
+        flash('نوع الملف غير مدعوم')
+        return redirect(url_for('dashboard'))
 
 @app.route("/logout")
 def logout():
