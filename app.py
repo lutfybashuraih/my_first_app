@@ -1,31 +1,181 @@
-from flask import Flask
+from flask import Flask, render_template, request, redirect, session, url_for
+import sqlite3
+import os
 
 app = Flask(__name__)
+app.secret_key = 'bensafy_secret_key_2026'
 
+# التأكد من وجود مجلد للإيصالات
+UPLOAD_FOLDER = 'uploads'
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-# الصفحة الرئيسية: bensafy.help/
+# إنشاء قاعدة البيانات والجداول تلقائياً
+def init_db():
+    conn = sqlite3.connect('system.db')
+    cursor = conn.cursor()
+    
+    # جدول العملاء
+    cursor.execute('''CREATE TABLE IF NOT EXISTS users (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT,
+                        phone TEXT UNIQUE,
+                        password TEXT,
+                        verified INTEGER DEFAULT 0)''')
+    
+    # جدول الموظفين
+    cursor.execute('''CREATE TABLE IF NOT EXISTS employees (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT,
+                        emp_account TEXT UNIQUE,
+                        password TEXT,
+                        active INTEGER DEFAULT 1)''')
+    
+    # جدول الحوالات والطلبات
+    cursor.execute('''CREATE TABLE IF NOT EXISTS requests (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        network TEXT,
+                        target_account TEXT,
+                        user_id INTEGER,
+                        user_name TEXT,
+                        amount REAL,
+                        currency TEXT,
+                        status TEXT DEFAULT 'قيد الانتظار',
+                        receipt TEXT,
+                        phone TEXT,
+                        emp_id INTEGER,
+                        emp_name TEXT,
+                        claimed_by TEXT)''')
+    
+    # جدول المدير العام
+    cursor.execute('''CREATE TABLE IF NOT EXISTS superadmin (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        username TEXT UNIQUE,
+                        password TEXT)''')
+    
+    # إنشاء حساب المدير الافتراضي (المستخدم: admin, كلمة المرور: 123456)
+    cursor.execute("INSERT OR IGNORE INTO superadmin (id, username, password) VALUES (1, 'admin', '123456')")
+    
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# --- مسارات العملاء ---
 @app.route("/")
 def home():
-  return "Hello, World! My app is running successfully on Render."
+    return render_template('index.html', page='login')
 
+@app.route("/register_page")
+def register_page(): 
+    return render_template('index.html', page='register')
 
-# صفحة العملاء: bensafy.help/clients
-@app.route("/clients")
-def clients():
-  return "هذه صفحة العملاء"
+@app.route("/login_page")
+def login_page(): 
+    return render_template('index.html', page='login')
 
+@app.route("/register", methods=['POST'])
+def register():
+    name = request.form['name']
+    phone = request.form['phone']
+    password = request.form['password']
+    try:
+        conn = sqlite3.connect('system.db')
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO users (name, phone, password, verified) VALUES (?, ?, ?, 1)", (name, phone, password))
+        conn.commit()
+        conn.close()
+        return redirect(url_for('login_page'))
+    except sqlite3.IntegrityError:
+        return render_template('index.html', page='register', error="رقم الهاتف مسجل مسبقاً!")
 
-# صفحة الموظفين: bensafy.help/employees
+@app.route("/login", methods=['POST'])
+def login():
+    name = request.form['name']
+    phone = request.form['phone']
+    password = request.form['password']
+    
+    conn = sqlite3.connect('system.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE phone=? AND password=??", (phone, password))
+    user = cursor.fetchone()
+    conn.close()
+    
+    if user:
+        session['user_id'] = user[0]
+        session['user_name'] = user[1]
+        return redirect(url_for('dashboard'))
+    else:
+        return render_template('index.html', page='login', error="خطأ في بيانات الدخول!")
+
+@app.route("/dashboard")
+def dashboard():
+    if 'user_id' not in session:
+        return redirect(url_for('login_page'))
+    
+    conn = sqlite3.connect('system.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM requests WHERE user_id=?", (session['user_id'],))
+    user_requests = cursor.fetchall()
+    conn.close()
+    
+    return render_template('index.html', page='dashboard', user_requests=user_requests)
+
+@app.route("/send", methods=['POST'])
+def send_request():
+    if 'user_id' not in session:
+        return redirect(url_for('login_page'))
+    
+    network = request.form['network']
+    target_account = request.form['target_account']
+    amount = request.form['amount']
+    currency = request.form['currency']
+    
+    conn = sqlite3.connect('system.db')
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO requests (network, target_account, user_id, user_name, amount, currency) VALUES (?, ?, ?, ?, ?, ?)",
+                   (network, target_account, session['user_id'], session['user_name'], amount, currency))
+    conn.commit()
+    conn.close()
+    
+    return redirect(url_for('dashboard'))
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for('login_page'))
+
+# --- مسارات الموظفين ---
 @app.route("/employees")
-def employees():
-  return "هذه صفحة الموظفين"
+def emp_login_page(): 
+    return render_template('emp_login.html')
 
-
-# صفحة مدير النظام: bensafy.help/admin
 @app.route("/admin")
 def admin_dashboard():
-  return "أهلاً بك في لوحة تحكم مدير النظام"
+    conn = sqlite3.connect('system.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM requests")
+    all_requests = cursor.fetchall()
+    conn.close()
+    return render_template('admin.html', all_requests=all_requests)
 
+# --- مسارات المدير العام (SuperAdmin) ---
+@app.route("/superadmin")
+def superadmin_login(): 
+    return render_template('superadmin_login.html')
+
+@app.route("/superadmin_dashboard")
+def superadmin_dashboard():
+    conn = sqlite3.connect('system.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM employees")
+    employees = cursor.fetchall()
+    conn.close()
+    return render_template('superadmin_dashboard.html', employees=employees)
+
+@app.route("/superadmin_logout")
+def superadmin_logout(): 
+    return redirect(url_for('superadmin_login'))
 
 if __name__ == "__main__":
-  app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=5000)
